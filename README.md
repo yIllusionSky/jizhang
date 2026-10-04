@@ -1,6 +1,6 @@
 # 小钱包
 
-用 Rust + GPUI Kit 制作的 Android 竖屏余额记账应用。人民币／美元钱包、余额更新、收入记录、日月年统计、资产图表和浅深色外观。数据保存在设备本地。
+用 Rust + GPUI Kit 制作的 Android 竖屏余额记账应用。人民币／美元钱包、改名与删除、余额更新、收入记录、日月年统计、资产图表、导入导出和浅深色外观。数据保存在设备本地。
 
 从 [Releases](https://github.com/yIllusionSky/jizhang/releases) 下载 ARM64 APK。支持 Android 8 及以上、具备 Vulkan 的 ARM64 手机。当前 GPUI Android 支持仍属实验阶段，已通过模拟器验证，尚未覆盖实体手机和 TalkBack。
 

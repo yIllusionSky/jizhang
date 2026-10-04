@@ -4,7 +4,9 @@
 
 Gradle JDK 使用 17–24。如提示 Java 25/26 不兼容，请在 Android Studio 的 Build Tools → Gradle → Gradle JDK 中选择兼容 JDK。SDK 路径可在 `android/local.properties` 的 `sdk.dir` 设置；该文件不提交。
 
-本地记录位于应用私有 `files/wallets-v1.json`。写入使用临时文件、fsync 和原子重命名。卸载会删除记录，Android 云备份已关闭。调试版可备份：
+本地记录位于应用私有 `files/wallets-v1.json`。写入使用临时文件、fsync 和原子重命名。卸载会删除记录，Android 云备份已关闭。正式版可在设置中“导出备份”，选择设备文件夹或文件提供方；“导入备份”只接收小钱包导出的版本化 UTF-8 JSON（最大 16 MiB），会校验金额、日期、ID、汇率和流水余额。确认后替换整个账本，取消或校验失败不改变数据。设置中的“恢复导入前账本”保留最近一次导入前的快照。损坏的原始文件在恢复导入时另存为 `wallets-unreadable-<时间>.json`，不静默丢弃。
+
+备份是未加密 JSON，包含财务数据，请保存到自己控制的位置。导出失败时目标位置可能留下不完整文件，应重新导出；导入会拒绝这类文件。原始内部存储文件和可导入备份的格式不同。调试版可提取内部文件用于排障：
 
 ```sh
 adb shell am force-stop app.jizhang.wallet
@@ -36,7 +38,7 @@ adb logcat -s jizhang AndroidRuntime
 
 本地签名发布还需设置 `ANDROID_KEYSTORE_FILE` 指向 JKS 文件，以及上述密码与别名环境变量。没有签名配置时，本地 `assembleRelease` 生成未签名 APK；工作流强制校验签名配置并用 apksigner 验证最终产物。
 
-发布步骤：修改根 Cargo.toml 的 workspace 版本，用 cargo check 更新 Cargo.lock，更新 CHANGELOG 对应版本区块并提交，然后执行：
+发布步骤：修改根 Cargo.toml 的 workspace 版本及 Android Gradle 的默认版本／versionCode，用 cargo check 更新 Cargo.lock，更新 CHANGELOG 对应版本区块并提交，然后执行：
 
 ```sh
 git tag vX.Y.Z

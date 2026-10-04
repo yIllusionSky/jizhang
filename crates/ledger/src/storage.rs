@@ -6,6 +6,7 @@ use std::{
 };
 
 /// One writer per app. Atomic replacement occurs only after a complete fsync.
+#[derive(Clone)]
 pub struct Store {
     path: PathBuf,
 }
@@ -24,6 +25,38 @@ impl Store {
         let ledger: Ledger = serde_json::from_slice(&bytes)?;
         ledger.validate()?;
         Ok(ledger)
+    }
+    fn before_import(&self) -> Self {
+        Self {
+            path: self.path.with_file_name("wallets-before-import.json"),
+        }
+    }
+    pub fn has_before_import(&self) -> bool {
+        self.before_import().path.is_file()
+    }
+    pub fn load_before_import(&self) -> Result<Ledger, LedgerError> {
+        if !self.has_before_import() {
+            return Err(LedgerError::InvalidBackup);
+        }
+        self.before_import().load()
+    }
+    /// Validate before touching disk. Preserve an undo snapshot before replacement.
+    pub fn replace_with_backup(&self, ledger: &Ledger) -> Result<(), LedgerError> {
+        ledger.validate()?;
+        match self.load() {
+            Ok(previous) => self.before_import().save(&previous)?,
+            Err(_) => {
+                // Retain a corrupt original for recovery instead of overwriting it.
+                let recovery = self.path.with_file_name(format!(
+                    "wallets-unreadable-{}.json",
+                    chrono::Utc::now().timestamp_millis()
+                ));
+                fs::copy(&self.path, &recovery)?;
+                File::open(recovery)?.sync_all()?;
+                File::open(self.path.parent().ok_or(LedgerError::InvalidData)?)?.sync_all()?;
+            }
+        }
+        self.save(ledger)
     }
     pub fn save(&self, ledger: &Ledger) -> Result<(), LedgerError> {
         ledger.validate()?;
@@ -85,6 +118,26 @@ mod tests {
             .unwrap();
         assert!(fresh > second);
     }
+    #[test]
+    fn importing_can_recover_corrupt_storage_without_losing_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        fs::write(dir.path().join("wallets-v1.json"), b"broken original").unwrap();
+        store.replace_with_backup(&Ledger::default()).unwrap();
+        assert!(store.load().unwrap().wallets().is_empty());
+        let recovery = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("wallets-unreadable-")
+            })
+            .unwrap();
+        assert_eq!(fs::read(recovery).unwrap(), b"broken original");
+    }
+
     #[test]
     fn saves_reload_and_corruption_is_not_silently_reset() {
         let dir = tempfile::tempdir().unwrap();

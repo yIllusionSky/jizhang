@@ -19,6 +19,39 @@ import android.widget.EditText;
 /** NativeActivity with a UI-thread InputConnection for multistage IMEs. */
 public class GpuiInputActivity extends NativeActivity {
     private InputProxy input;
+    private int preferredKeyboardType;
+
+    // Change only Android's layout; never create a second native IME session.
+    public void setWalletInputType(int type) {
+        runOnUiThread(() -> {
+            if (preferredKeyboardType == type) return;
+            preferredKeyboardType = type;
+            if (input != null && input.hasFocus()) {
+                applyInputType();
+                ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).restartInput(input);
+            }
+        });
+    }
+
+    // Reopen an already focused GPUI field after Android dismisses its IME.
+    // Keep the InputConnection and native session intact when merely showing it.
+    public void showWalletKeyboard() {
+        runOnUiThread(() -> {
+            if (input == null) return;
+            input.requestFocus();
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                    .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+        });
+    }
+
+    private void applyInputType() {
+        int type = preferredKeyboardType == 5
+                ? InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL
+                : InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        if (input.getInputType() != type) input.setInputType(type);
+        input.setSingleLine(true);
+        input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_ACTION_DONE);
+    }
     @Override protected void onCreate(Bundle state) {
         // NativeActivity's dlopen alone does not register JNI native methods.
         try {
@@ -39,20 +72,12 @@ public class GpuiInputActivity extends NativeActivity {
                 input.setPadding(0, 0, 0, 0);
                 addContentView(input, new ViewGroup.LayoutParams(1, 1));
             }
-            input.reset(session);
-            int type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
-            switch (keyboardType) {
-                case 1: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; break;
-                case 2: type = InputType.TYPE_CLASS_PHONE; break;
-                case 3: type = InputType.TYPE_CLASS_NUMBER; break;
-                case 4: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI; break;
-                case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
-            }
-            input.setInputType(type);
-            input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+            boolean changed = input.session != session;
+            if (changed) input.reset(session);
+            applyInputType();
             input.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-            imm.restartInput(input);
+            if (changed) imm.restartInput(input);
             imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
         });
     }
@@ -211,7 +236,10 @@ public class GpuiInputActivity extends NativeActivity {
                         return true;
                     }
                     if (event.getKeyCode() == KeyEvent.KEYCODE_ENTER) {
-                        if (event.getAction() == KeyEvent.ACTION_DOWN) commitText("\n", 1);
+                        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                            finishComposingText();
+                            nativeIme(session, 4, "", 0, 0);
+                        }
                         return true;
                     }
                     int character = event.getUnicodeChar();

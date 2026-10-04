@@ -1,5 +1,6 @@
 mod editor;
 mod home;
+mod settings;
 mod statistics;
 mod style;
 
@@ -7,7 +8,7 @@ use chrono::{Local, NaiveDate};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
-        ActiveTheme, IconName, Sizable, WindowExt,
+        ActiveTheme, Disableable, IconName, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         input::{InputEvent, InputState},
     },
@@ -24,6 +25,8 @@ enum Page {
     Create,
     Edit(u64),
     Settings,
+    Rename(u64),
+    Import,
 }
 
 pub struct WalletApp {
@@ -36,6 +39,11 @@ pub struct WalletApp {
     income: bool,
     error: Option<String>,
     load_failed: bool,
+    busy: bool,
+    message: Option<String>,
+    pending_import: Option<Ledger>,
+    has_restore: bool,
+    generation: u64,
     syncing: bool,
     sync_error: Option<String>,
     attempted: Option<NaiveDate>,
@@ -50,6 +58,7 @@ pub struct WalletApp {
 impl WalletApp {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = Store::new(path);
+        let has_restore = store.has_before_import();
         let (ledger, error) = match store.load() {
             Ok(ledger) => (ledger, None),
             Err(e) => (Ledger::default(), Some(e.to_string())),
@@ -57,10 +66,13 @@ impl WalletApp {
         apply(ledger.is_dark(), cx);
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("例如：日常零钱"));
         let amount = cx.new(|cx| InputState::new(window, cx).placeholder("0.00"));
-        let mut subscriptions: Vec<Subscription> = [&name, &amount]
+        let mut subscriptions: Vec<Subscription> = [(&name, false), (&amount, true)]
             .into_iter()
-            .map(|state| {
-                cx.subscribe_in(state, window, |this, _, event, _, cx| {
+            .map(|(state, decimal)| {
+                cx.subscribe_in(state, window, move |this, _, event, _, cx| {
+                    if matches!(event, InputEvent::Focus) {
+                        crate::documents::set_input_type(decimal);
+                    }
                     if matches!(event, InputEvent::Focus | InputEvent::Blur) {
                         // Android updates content insets after its resize callback.
                         // Refresh once after the IME animation, without continuous polling.
@@ -73,8 +85,11 @@ impl WalletApp {
                         .detach();
                     }
                     if matches!(event, InputEvent::Change) {
-                        this.error = None;
-                        cx.notify();
+                        let had_error = this.error.take().is_some();
+                        // Name edits already redraw their own Input entity.
+                        if decimal || had_error {
+                            cx.notify();
+                        }
                     }
                 })
             })
@@ -109,6 +124,11 @@ impl WalletApp {
             currency: Currency::Cny,
             income: false,
             load_failed: error.is_some(),
+            busy: false,
+            message: None,
+            pending_import: None,
+            has_restore,
+            generation: 0,
             error,
             syncing: false,
             sync_error: None,
@@ -127,6 +147,7 @@ impl WalletApp {
     pub fn sync_rates(&mut self, force: bool, cx: &mut Context<Self>) {
         let today = Local::now().date_naive();
         if self.syncing
+            || self.busy
             || self.load_failed
             || (!force
                 && (self.attempted == Some(today)
@@ -141,6 +162,7 @@ impl WalletApp {
         self.attempted = Some(today);
         self.sync_error = None;
         cx.notify();
+        let generation = self.generation;
         let job = cx
             .background_executor()
             .spawn(async { crate::rates::fetch() });
@@ -148,6 +170,11 @@ impl WalletApp {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
                 this.syncing = false;
+                if this.generation != generation || this.busy {
+                    this.attempted = None;
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(rate) => {
                         let mut next = this.ledger.clone();
@@ -165,12 +192,18 @@ impl WalletApp {
         .detach();
     }
     fn navigate(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         self.page = page;
+        self.message = None;
+        if page != Page::Import {
+            self.pending_import = None;
+        }
         if !self.load_failed {
             self.error = None;
         }
         window.focus(&self.focus, cx);
-        gpui_mobile::hide_keyboard();
         cx.notify();
     }
     fn open_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -188,38 +221,62 @@ impl WalletApp {
             .update(cx, |s, cx| s.set_value(balance, window, cx));
         self.navigate(Page::Edit(id), window, cx);
     }
+    fn open_rename(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(wallet) = self.ledger.wallet(id) {
+            let name = wallet.name().to_owned();
+            self.name
+                .update(cx, |state, cx| state.set_value(name, window, cx));
+            self.navigate(Page::Rename(id), window, cx);
+            let name = self.name.clone();
+            window.on_next_frame(move |window, cx| {
+                crate::documents::set_input_type(false);
+                name.update(cx, |state, cx| state.focus(window, cx));
+                crate::documents::show_keyboard();
+            });
+        }
+    }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.load_failed {
+        if self.load_failed || self.busy {
             return;
         }
         let mut next = self.ledger.clone();
         let now = Local::now();
-        let result = Money::parse(&self.amount.read(cx).value()).and_then(|amount| {
-            match self.page {
-                Page::Create => next
-                    .create(
-                        &self.name.read(cx).value(),
-                        self.currency,
+        let result = if let Page::Rename(id) = self.page {
+            next.rename_wallet(id, &self.name.read(cx).value())
+                .and_then(|_| self.store.save(&next))
+        } else {
+            Money::parse(&self.amount.read(cx).value()).and_then(|amount| {
+                match self.page {
+                    Page::Create => next
+                        .create(
+                            &self.name.read(cx).value(),
+                            self.currency,
+                            amount,
+                            now.date_naive(),
+                            &now.format("%H:%M").to_string(),
+                        )
+                        .map(|_| ()),
+                    Page::Edit(id) => next.record(
+                        id,
                         amount,
+                        self.income,
                         now.date_naive(),
                         &now.format("%H:%M").to_string(),
-                    )
-                    .map(|_| ()),
-                Page::Edit(id) => next.record(
-                    id,
-                    amount,
-                    self.income,
-                    now.date_naive(),
-                    &now.format("%H:%M").to_string(),
-                ),
-                _ => return Ok(()),
-            }?;
-            self.store.save(&next)
-        });
+                    ),
+                    _ => return Ok(()),
+                }?;
+                self.store.save(&next)
+            })
+        };
         match result {
             Ok(()) => {
                 self.ledger = next;
-                self.navigate(Page::Home, window, cx);
+                let page = if let Page::Rename(id) = self.page {
+                    Page::Edit(id)
+                } else {
+                    Page::Home
+                };
+                self.navigate(page, window, cx);
             }
             Err(e) => {
                 self.error = Some(e.to_string());
@@ -234,7 +291,6 @@ impl WalletApp {
         let name = wallet.name().to_owned();
         let view = cx.entity().downgrade();
         window.focus(&self.focus, cx);
-        gpui_mobile::hide_keyboard();
         let width = window.viewport_size().width - rems(3.).to_pixels(window.rem_size());
         window.open_dialog(cx, move |dialog, _, cx| {
             let view = view.clone();
@@ -288,7 +344,7 @@ impl WalletApp {
         });
     }
     fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        if self.load_failed {
+        if self.load_failed || self.busy {
             return;
         }
         let mut next = self.ledger.clone();
@@ -308,6 +364,8 @@ impl WalletApp {
             Page::Statistics => "统计".into(),
             Page::Create => "新建钱包".into(),
             Page::Settings => "设置".into(),
+            Page::Rename(_) => "钱包改名".into(),
+            Page::Import => "导入账本".into(),
             Page::Edit(id) => self
                 .ledger
                 .wallet(id)
@@ -324,7 +382,14 @@ impl WalletApp {
                     .min_w_0()
                     .flex_1()
                     .when(
-                        matches!(self.page, Page::Create | Page::Edit(_) | Page::Settings),
+                        matches!(
+                            self.page,
+                            Page::Create
+                                | Page::Edit(_)
+                                | Page::Settings
+                                | Page::Rename(_)
+                                | Page::Import
+                        ),
                         |r| {
                             r.child(
                                 Button::new("back")
@@ -333,8 +398,14 @@ impl WalletApp {
                                     .h_12()
                                     .w_12()
                                     .icon(IconName::ArrowLeft)
+                                    .disabled(self.busy)
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.navigate(Page::Home, window, cx)
+                                        let page = match this.page {
+                                            Page::Rename(id) => Page::Edit(id),
+                                            Page::Import => Page::Settings,
+                                            _ => Page::Home,
+                                        };
+                                        this.navigate(page, window, cx)
                                     })),
                             )
                         },
@@ -356,6 +427,15 @@ impl WalletApp {
                 },
                 |r, id| {
                     r.child(
+                        Button::new("rename-wallet")
+                            .ghost()
+                            .h_12()
+                            .label("改名")
+                            .on_click(
+                                cx.listener(move |this, _, w, cx| this.open_rename(id, w, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new("delete-wallet")
                             .ghost()
                             .h_12()
@@ -382,8 +462,13 @@ impl WalletApp {
             })
     }
     fn bottom(&self, cx: &mut Context<Self>) -> AnyElement {
-        if matches!(self.page, Page::Create | Page::Edit(_)) {
-            let label = if self.page == Page::Create {
+        if self.page == Page::Import {
+            return self.import_bottom(cx).into_any_element();
+        }
+        if matches!(self.page, Page::Create | Page::Edit(_) | Page::Rename(_)) {
+            let label = if matches!(self.page, Page::Rename(_)) {
+                "保存名称"
+            } else if self.page == Page::Create {
                 "创建钱包"
             } else if self.income {
                 "记录收入"
@@ -401,6 +486,7 @@ impl WalletApp {
                         .h_12()
                         .w_full()
                         .label(label)
+                        .disabled(self.busy)
                         .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                 )
                 .into_any_element();
@@ -442,41 +528,6 @@ impl WalletApp {
             )
             .into_any_element()
     }
-    fn settings(&self, cx: &mut Context<Self>) -> Div {
-        column()
-            .child(heading("外观"))
-            .child(
-                Button::new("theme-toggle")
-                    .large()
-                    .h_12()
-                    .label(if self.ledger.is_dark() {
-                        "切换浅色外观"
-                    } else {
-                        "切换深色外观"
-                    })
-                    .icon(if self.ledger.is_dark() {
-                        IconName::Sun
-                    } else {
-                        IconName::Moon
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_theme(cx))),
-            )
-            .child(heading("汇率"))
-            .child(self.rate_status(cx))
-            .child(
-                Button::new("refresh-settings")
-                    .large()
-                    .h_12()
-                    .label(if self.syncing {
-                        "正在同步"
-                    } else {
-                        "同步汇率"
-                    })
-                    .icon(IconName::RefreshCw)
-                    .on_click(cx.listener(|this, _, _, cx| this.sync_rates(true, cx))),
-            )
-            .child(muted("汇率来源：Frankfurter / ECB", cx))
-    }
 }
 
 impl Render for WalletApp {
@@ -486,14 +537,15 @@ impl Render for WalletApp {
             .and_then(|p| p.primary_window())
             .map(|w| w.safe_area_insets_logical())
             .unwrap_or_default();
-        let body = if self.load_failed {
+        let body = if self.load_failed && !matches!(self.page, Page::Settings | Page::Import) {
             column()
                 .child(heading("暂时无法读取钱包"))
                 .child(muted("原始数据已保留。请关闭应用后重试。", cx))
         } else {
             match self.page {
                 Page::Home => self.home(cx),
-                Page::Create | Page::Edit(_) => self.editor(cx),
+                Page::Create | Page::Edit(_) | Page::Rename(_) => self.editor(cx),
+                Page::Import => self.import_preview(cx),
                 Page::Statistics => self.statistics(cx),
                 Page::Settings => self.settings(cx),
             }
@@ -514,9 +566,13 @@ impl Render for WalletApp {
                         || this.amount.read(cx).focus_handle(cx).is_focused(window)
                     {
                         window.focus(&this.focus, cx);
-                        gpui_mobile::hide_keyboard();
                     } else if this.page != Page::Home {
-                        this.navigate(Page::Home, window, cx);
+                        let page = match this.page {
+                            Page::Rename(id) => Page::Edit(id),
+                            Page::Import => Page::Settings,
+                            _ => Page::Home,
+                        };
+                        this.navigate(page, window, cx);
                     }
                     cx.stop_propagation();
                 }
@@ -533,17 +589,17 @@ impl Render for WalletApp {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .child(
-                        column().px_6().pb_6().child(body).when_some(
-                            self.error
-                                .clone()
-                                .filter(|_| !matches!(self.page, Page::Create | Page::Edit(_))),
-                            |d, error| {
-                                d.child(div().text_sm().text_color(cx.theme().danger).child(error))
-                            },
-                        ),
-                    ),
+                    .child(column().px_6().pb_6().child(body).when_some(
+                        self.error.clone().filter(|_| {
+                            !matches!(self.page, Page::Create | Page::Edit(_) | Page::Rename(_))
+                        }),
+                        |d, error| {
+                            d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        },
+                    )),
             )
-            .when(!self.load_failed, |d| d.child(self.bottom(cx)))
+            .when(!self.load_failed || self.page == Page::Import, |d| {
+                d.child(self.bottom(cx))
+            })
     }
 }

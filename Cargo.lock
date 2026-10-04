@@ -3578,6 +3578,7 @@ dependencies = [
  "android-activity",
  "android_logger",
  "chrono",
+ "futures-channel",
  "gpui-kit",
  "gpui-pre-mobile",
  "jni",

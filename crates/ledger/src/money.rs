@@ -16,6 +16,10 @@ pub enum LedgerError {
     ClockReversed,
     #[error("汇率尚未就绪，请联网同步后重试")]
     MissingRate,
+    #[error("不是有效的小钱包备份，或版本不支持")]
+    InvalidBackup,
+    #[error("备份文件过大（最多 16 MB）")]
+    BackupTooLarge,
     #[error("数据文件校验失败，原文件已保留")]
     InvalidData,
     #[error("无法读写本机数据：{0}")]
@@ -45,7 +49,7 @@ impl Money {
         let mut pieces = text.split('.');
         let whole = pieces.next().unwrap_or_default();
         let fraction = pieces.next().unwrap_or_default();
-        if whole.is_empty()
+        if (whole.is_empty() && fraction.is_empty())
             || !whole.bytes().all(|b| b.is_ascii_digit())
             || !fraction.bytes().all(|b| b.is_ascii_digit())
             || fraction.len() > 2
@@ -53,7 +57,11 @@ impl Money {
         {
             return Err(LedgerError::InvalidAmount);
         }
-        let whole: i64 = whole.parse().map_err(|_| LedgerError::Overflow)?;
+        let whole: i64 = if whole.is_empty() {
+            0
+        } else {
+            whole.parse().map_err(|_| LedgerError::Overflow)?
+        };
         let fraction: i64 = match fraction.len() {
             0 => 0,
             1 => fraction.parse::<i64>().unwrap() * 10,
@@ -117,11 +125,13 @@ mod tests {
     #[test]
     fn decimal_parsing_is_exact_and_rejects_bad_input() {
         assert_eq!(Money::parse("0.29").unwrap().cents(), 29);
+        assert_eq!(Money::parse(".5").unwrap().cents(), 50);
         assert_eq!(Money::parse("12.3").unwrap().cents(), 1230);
         for value in [
             "",
             "-1",
             "NaN",
+            ".",
             "1e3",
             "1.001",
             "1,000",

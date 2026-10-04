@@ -1,6 +1,7 @@
 package app.jizhang.wallet;
 
 import android.os.Bundle;
+import android.content.Intent;
 import android.view.View;
 import java.net.URL;
 import javax.net.ssl.HttpsURLConnection;
@@ -10,8 +11,21 @@ import dev.gpui.mobile.GpuiInputActivity;
 
 /** Android owns the surface and IME; Rust owns all wallet views and state. */
 public final class WalletActivity extends GpuiInputActivity {
+    private WalletDocuments documents;
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        documents = new WalletDocuments(this);
+    }
+
+    public void chooseWalletDocument(long request, String json, String filename) {
+        documents.choose(request, json, filename);
+    }
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        if (!documents.onResult(request, result, data)) super.onActivityResult(request, result, data);
+    }
+    @Override protected void onDestroy() {
+        documents.close();
+        super.onDestroy();
     }
 
     // Called on Rust's background executor; uses Android's TLS and proxy settings.

@@ -147,6 +147,16 @@ impl Ledger {
         self.entries.retain(|entry| entry.wallet_id != id);
         Ok(())
     }
+    pub fn rename_wallet(&mut self, id: u64, name: &str) -> Result<(), LedgerError> {
+        let name = checked_name(name)?;
+        let wallet = self
+            .wallets
+            .iter_mut()
+            .find(|wallet| wallet.id == id)
+            .ok_or(LedgerError::MissingWallet)?;
+        wallet.name = name.to_owned();
+        Ok(())
+    }
     pub fn is_dark(&self) -> bool {
         self.dark
     }
@@ -225,10 +235,16 @@ impl Ledger {
         date: NaiveDate,
         time: &str,
     ) -> Result<u64, LedgerError> {
-        let name = name.trim();
-        if name.is_empty() || name.chars().count() > 40 {
-            return Err(LedgerError::InvalidName);
+        let name = checked_name(name)?;
+        chrono::NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| LedgerError::InvalidData)?;
+        if self.wallets.len() >= 10_000 {
+            return Err(LedgerError::InvalidData);
         }
+        let next_id = self
+            .next_id
+            .checked_add(2)
+            .filter(|id| *id < u64::MAX)
+            .ok_or(LedgerError::InvalidData)?;
         self.check_date(date)?;
         let rate_micros = self.rate_for(currency, date)?;
         let id = self.next_id;
@@ -248,7 +264,7 @@ impl Ledger {
             balance: initial,
             rate_micros,
         });
-        self.next_id += 1;
+        self.next_id = next_id;
         Ok(id)
     }
     pub fn record(
@@ -260,9 +276,18 @@ impl Ledger {
         time: &str,
     ) -> Result<(), LedgerError> {
         self.check_date(date)?;
+        chrono::NaiveTime::parse_from_str(time, "%H:%M").map_err(|_| LedgerError::InvalidData)?;
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .filter(|id| *id < u64::MAX)
+            .ok_or(LedgerError::InvalidData)?;
         let wallet = self.wallet(id).ok_or(LedgerError::MissingWallet)?;
         let rate_micros = self.rate_for(wallet.currency, date)?;
         let previous = self.balance(id).cents();
+        if !income && amount.cents() == previous {
+            return Ok(());
+        }
         let (kind, delta, balance) = if income {
             if amount.cents() == 0 {
                 return Err(LedgerError::EmptyIncome);
@@ -292,59 +317,80 @@ impl Ledger {
             balance,
             rate_micros,
         });
-        self.next_id += 1;
+        self.next_id = next_id;
         Ok(())
     }
     pub(crate) fn validate(&self) -> Result<(), LedgerError> {
-        let mut replay = Self {
-            rates: self.rates.clone(),
-            ..Self::default()
-        };
-        for rate in &self.rates {
-            Rate::new(rate.date, rate.synced_on, rate.micros)?;
-        }
-        if self.version != 1 || self.wallets.len() > 10_000 {
+        use std::collections::{HashMap, HashSet};
+        if self.version != 1
+            || self.wallets.len() > 10_000
+            || self.next_id == 0
+            || self.next_id == u64::MAX
+        {
             return Err(LedgerError::InvalidData);
         }
-        let mut ids = std::collections::HashSet::new();
-        for wallet in &self.wallets {
-            if !ids.insert(wallet.id)
-                || wallet.id >= self.next_id
-                || wallet.name.trim().is_empty()
-                || wallet.name.chars().count() > 40
-            {
+        let mut rate_dates = HashSet::new();
+        for rate in &self.rates {
+            Rate::new(rate.date, rate.synced_on, rate.micros)?;
+            if !rate_dates.insert(rate.synced_on) {
                 return Err(LedgerError::InvalidData);
             }
         }
-        let mut opened = std::collections::HashSet::new();
+        let earliest_rate = self.rates.iter().map(|rate| rate.synced_on).min();
+        let mut ids = HashSet::new();
+        let mut wallets = HashMap::new();
+        for wallet in &self.wallets {
+            if wallet.id == 0 || !ids.insert(wallet.id) || wallet.id >= self.next_id {
+                return Err(LedgerError::InvalidData);
+            }
+            checked_name(&wallet.name)?;
+            wallets.insert(wallet.id, wallet.currency);
+        }
+        let mut balances = HashMap::new();
+        let mut last_date = None;
         for e in &self.entries {
-            if !ids.insert(e.id)
+            let currency = wallets.get(&e.wallet_id).ok_or(LedgerError::InvalidData)?;
+            if e.id == 0
+                || !ids.insert(e.id)
                 || e.id >= self.next_id
-                || self.wallet(e.wallet_id).is_none()
-                || e.rate_micros == 0
-                || e.rate_micros > 100_000_000
+                || !(100_000..=100_000_000).contains(&e.rate_micros)
+                || (*currency == Currency::Cny && e.rate_micros != 1_000_000)
+                || (*currency == Currency::Usd && !earliest_rate.is_some_and(|date| date <= e.date))
+                || last_date.is_some_and(|date| date > e.date)
             {
                 return Err(LedgerError::InvalidData);
             }
+            chrono::NaiveTime::parse_from_str(&e.time, "%H:%M")
+                .map_err(|_| LedgerError::InvalidData)?;
             Money::from_cents(e.amount.cents())?;
             Money::from_cents(e.balance.cents())?;
-            replay.check_date(e.date)?;
-            let old = replay.balance(e.wallet_id).cents();
-            let expected = match e.kind {
-                EntryKind::Opening if opened.insert(e.wallet_id) => e.amount.cents(),
-                EntryKind::Opening => return Err(LedgerError::InvalidData),
-                _ if !opened.contains(&e.wallet_id) => return Err(LedgerError::InvalidData),
-                EntryKind::Expense => old - e.amount.cents(),
-                EntryKind::Income | EntryKind::Adjustment => old + e.amount.cents(),
+            let previous = balances.get(&e.wallet_id).copied();
+            let expected = match (e.kind, previous) {
+                (EntryKind::Opening, None) => e.amount.cents(),
+                (EntryKind::Opening, Some(_)) | (_, None) => return Err(LedgerError::InvalidData),
+                (EntryKind::Expense, Some(old)) => old - e.amount.cents(),
+                (EntryKind::Income, Some(_)) if e.amount.cents() == 0 => {
+                    return Err(LedgerError::InvalidData);
+                }
+                (_, Some(old)) => old + e.amount.cents(),
             };
             if expected != e.balance.cents() {
                 return Err(LedgerError::InvalidData);
             }
-            replay.entries.push(e.clone());
+            balances.insert(e.wallet_id, expected);
+            last_date = Some(e.date);
         }
-        if opened.len() != self.wallets.len() {
+        if balances.len() != wallets.len() {
             return Err(LedgerError::InvalidData);
         }
         Ok(())
     }
+}
+
+fn checked_name(name: &str) -> Result<&str, LedgerError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 40 || name.chars().any(char::is_control) {
+        return Err(LedgerError::InvalidName);
+    }
+    Ok(name)
 }

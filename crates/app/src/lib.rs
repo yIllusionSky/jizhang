@@ -5,3 +5,6 @@ mod android;
 mod rates;
 #[cfg(target_os = "android")]
 mod ui;
+
+#[cfg(target_os = "android")]
+mod documents;

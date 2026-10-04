@@ -2,7 +2,58 @@ use super::*;
 use gpui_kit::component::{Disableable, input::Input};
 
 impl WalletApp {
+    fn mobile_input(&self, decimal: bool, _cx: &mut Context<Self>) -> Div {
+        let state = if decimal { &self.amount } else { &self.name };
+        let clear_state = state.clone();
+        div()
+            .capture_any_mouse_down(move |_, _, _| crate::documents::set_input_type(decimal))
+            .on_mouse_down(MouseButton::Left, |_, _, _| {
+                crate::documents::show_keyboard()
+            })
+            .child(
+                Input::new(state)
+                    .large()
+                    .h_12()
+                    .when(decimal, |input| {
+                        input.h_16().text_2xl().prefix(
+                            div()
+                                .font_weight(FontWeight::BOLD)
+                                .child(self.currency.symbol()),
+                        )
+                    })
+                    .suffix(
+                        Button::new(if decimal {
+                            "clear-amount"
+                        } else {
+                            "clear-name"
+                        })
+                        .ghost()
+                        .icon(IconName::Close)
+                        .h_12()
+                        .w_12()
+                        .tab_stop(false)
+                        .accessibility_label("清空输入")
+                        .on_click(move |_, window, cx| {
+                            clear_state.update(cx, |state, cx| {
+                                state.set_value("", window, cx);
+                                state.focus(window, cx);
+                            });
+                            crate::documents::show_keyboard();
+                        }),
+                    ),
+            )
+    }
+
     pub(super) fn editor(&self, cx: &mut Context<Self>) -> Div {
+        if matches!(self.page, Page::Rename(_)) {
+            return column()
+                .gap_2()
+                .child("钱包名称")
+                .child(self.mobile_input(false, cx))
+                .when_some(self.error.clone(), |d, error| {
+                    d.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                });
+        }
         let create = self.page == Page::Create;
         let mut content = column().gap_6();
         if create {
@@ -11,7 +62,7 @@ impl WalletApp {
                     column()
                         .gap_2()
                         .child("钱包名称")
-                        .child(Input::new(&self.name).large().h_12().cleanable(true)),
+                        .child(self.mobile_input(false, cx)),
                 )
                 .child(column().gap_2().child("币种").child(row().gap_2().children(
                     [Currency::Cny, Currency::Usd].into_iter().map(|currency| {
@@ -92,18 +143,7 @@ impl WalletApp {
                 } else {
                     "设置余额"
                 })
-                .child(
-                    Input::new(&self.amount)
-                        .large()
-                        .h_16()
-                        .text_2xl()
-                        .cleanable(true)
-                        .prefix(
-                            div()
-                                .font_weight(FontWeight::BOLD)
-                                .child(self.currency.symbol()),
-                        ),
-                ),
+                .child(self.mobile_input(true, cx)),
         );
         content = content.when_some(self.error.clone(), |d, error| {
             d.child(div().text_sm().text_color(cx.theme().danger).child(error))
