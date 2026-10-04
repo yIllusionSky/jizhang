@@ -1,0 +1,85 @@
+name: Android Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '2'
+  ANDROID_NDK_VERSION: 27.0.12077973
+
+jobs:
+  release:
+    name: 构建并发布 Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: 校验版本与发布说明
+        run: python3 scripts/prepare-release.py "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-notes.md"
+      - name: 创建草稿 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["isDraft"], "Release is already published"' "$RUNNER_TEMP/release.json"
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "小钱包 $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: 1.98.1
+          targets: aarch64-linux-android
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-aarch64-linux-android
+      - name: 安装 Android SDK 与 NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+      - name: 检查格式与业务规则
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p wallet-ledger
+      - name: 构建签名 APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/wallet-release.jks
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_FILE"
+          chmod 600 "$ANDROID_KEYSTORE_FILE"
+          ./android/gradlew -p android --no-daemon assembleRelease
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/jizhang-$APP_VERSION-android-arm64.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "dist/jizhang-$APP_VERSION-android-arm64.apk"
+          cd dist
+          sha256sum ./*.apk > SHA256SUMS.txt
+      - name: 上传产物后公开发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/*.apk dist/SHA256SUMS.txt --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest --notes-file "$RUNNER_TEMP/release-notes.md"
+      - name: 清理签名文件
+        if: always()
+        run: rm -f "$RUNNER_TEMP/wallet-release.jks"

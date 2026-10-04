@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x00401000" android:required="true" />
+    <application android:label="小钱包" android:theme="@style/WalletTheme"
+        android:icon="@drawable/ic_wallet" android:allowBackup="false"
+        android:supportsRtl="true" android:usesCleartextTraffic="false"
+        android:extractNativeLibs="true">
+        <activity android:name=".WalletActivity" android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|locale|layoutDirection|fontScale|fontWeightAdjustment|mcc|mnc|colorMode"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.lib_name" android:value="jizhang" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

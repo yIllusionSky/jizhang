@@ -1,0 +1,15 @@
+/target/
+**/build/
+**/.gradle/
+**/local.properties
+**/.idea/
+*.iml
+.DS_Store
+/output/android/
+/output/*.apk
+/output/
+*.jks
+*.keystore
+.env
+.env.*
+wallets-backup.json

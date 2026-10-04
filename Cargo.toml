@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/ledger", "crates/app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
+
