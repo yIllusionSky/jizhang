@@ -15,6 +15,8 @@ adb exec-out run-as app.jizhang.wallet cat files/wallets-v1.json > wallets-backu
 
 文件包含钱包名称及余额，按个人财务数据妥善保存。不要直接编辑运行中应用的数据文件。
 
+发布构建只编译 warning/error 日志，减少原生库体积；需要框架信息日志排障时使用调试构建。
+
 日志：
 
 ```sh
@@ -25,7 +27,7 @@ adb logcat -s jizhang AndroidRuntime
 
 ## APK 发布
 
-`assembleDebug` 编译调试 Rust 库；`assembleRelease` 编译优化后的 release 库。GitHub Release 只由 `vX.Y.Z` tag 触发，先创建草稿，构建和上传全部成功后公开。普通 push 不构建；面向 main 的 PR 执行格式、业务测试和 Android 调试构建。
+`assembleDebug` 编译调试 Rust 库；`assembleRelease` 编译优化后的 release 库。发布参数为体积优先 `opt-level="s"`、完整 LTO、单代码生成单元和符号剥离，构建较慢；图片使用一份共用的无损 WebP。GitHub Release 只由 `vX.Y.Z` tag 触发，先创建草稿，构建和上传全部成功后公开。普通 push 不构建；面向 main 的 PR 执行格式、业务测试和 Android 调试构建。
 
 仓库 Actions secrets：
 

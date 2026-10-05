@@ -13,6 +13,7 @@ debug = 0
 
 [profile.release]
 opt-level = "s"
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 strip = true
 

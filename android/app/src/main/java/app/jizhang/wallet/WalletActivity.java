@@ -28,6 +28,17 @@ public final class WalletActivity extends GpuiInputActivity {
         super.onDestroy();
     }
 
+    // One packaged image serves both Android's icon and the GPUI mascot.
+    public byte[] loadWalletMascot() throws java.io.IOException {
+        try (InputStream input = getResources().openRawResource(R.drawable.ic_wallet);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            return output.toByteArray();
+        }
+    }
+
     // Called on Rust's background executor; uses Android's TLS and proxy settings.
     public String fetchExchangeRate() throws Exception {
         HttpsURLConnection connection = (HttpsURLConnection) new URL(

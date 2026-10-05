@@ -136,8 +136,8 @@ impl WalletApp {
             period: Period::Month,
             anchor: Local::now().date_naive(),
             mascot: Arc::new(Image::from_bytes(
-                ImageFormat::Png,
-                include_bytes!("../../assets/wallet-mascot.png").to_vec(),
+                ImageFormat::Webp,
+                crate::android::load_mascot(),
             )),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
